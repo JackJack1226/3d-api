@@ -12,55 +12,11 @@ export default async function handler(req, res) {
   if (!image_url) return res.json({ success: false, error: "缺少image_url" });
 
   try {
-    // 下载图片
-    const imgResp = await fetch(image_url, {
-      headers: { "User-Agent": "Mozilla/5.0" }
-    });
-    if (!imgResp.ok) return res.json({ success: false, error: "下载图片失败:" + imgResp.status });
-    const imgBuffer = await imgResp.arrayBuffer();
-    const rand = Math.random().toString(36).substring(2, 8);
-    const filename = rand + ".png";
-
-    // 上传图片（带 HF Token）
-    const formData = new FormData();
-    formData.append("files", new Blob([imgBuffer], { type: "image/png" }), filename);
-
-    const uploadResp = await fetch(HF_SPACE + "/upload", {
-      method: "POST",
-      headers: {
-        "Authorization": "Bearer " + HF_TOKEN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Origin": HF_SPACE,
-        "Referer": HF_SPACE + "/",
-        "Accept": "*/*",
-      },
-      body: formData
-    });
-
-    console.log("upload status:", uploadResp.status);
-    const uploadText = await uploadResp.text();
-    console.log("upload result:", uploadText.slice(0, 200));
-
-    if (!uploadResp.ok) {
-      return res.json({ success: false, error: "上传失败:" + uploadResp.status + " " + uploadText.slice(0, 100) });
-    }
-
-    let paths;
-    try { paths = JSON.parse(uploadText); } catch(e) {
-      return res.json({ success: false, error: "上传响应解析失败:" + uploadText.slice(0, 100) });
-    }
-
-    if (!paths || paths.length === 0) {
-      return res.json({ success: false, error: "上传返回为空" });
-    }
-
-    const uploadedPath = paths[0];
-    console.log("uploaded path:", uploadedPath);
-
-    // 获取 API 端点名
+    // 不上传文件！直接用图片URL调用 gradio_api
+    // 先获取端点列表
     let apiName = "predict";
     try {
-      const infoResp = await fetch(HF_SPACE + "/info", {
+      const infoResp = await fetch(HF_SPACE + "/gradio_api/info", {
         headers: {
           "Authorization": "Bearer " + HF_TOKEN,
           "User-Agent": "Mozilla/5.0"
@@ -72,55 +28,109 @@ export default async function handler(req, res) {
         console.log("endpoints:", eps);
         if (eps.length > 0) apiName = eps[0].replace(/^\//, "");
       }
-    } catch(e) { console.log("info error:", e.message); }
+    } catch(e) { console.log("info err:", e.message); }
 
-    // 提交任务
+    // 直接用图片URL提交（不需要上传！）
     const payload = {
       data: [{
-        path: uploadedPath,
+        url: image_url,
         orig_name: "image.png",
-        size: imgBuffer.byteLength,
         mime_type: "image/png",
         meta: { _type: "gradio.FileData" }
       }]
     };
 
-    const submitUrl = HF_SPACE + "/call/" + apiName;
-    console.log("submitting to:", submitUrl);
+    // 试两个端点格式
+    const submitUrls = [
+      HF_SPACE + "/gradio_api/call/" + apiName,
+      HF_SPACE + "/call/" + apiName,
+    ];
 
-    const callResp = await fetch(submitUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + HF_TOKEN,
-        "User-Agent": "Mozilla/5.0",
-        "Origin": HF_SPACE,
-        "Referer": HF_SPACE + "/",
-      },
-      body: JSON.stringify(payload)
-    });
+    let eventId = null;
+    let usedSubmitUrl = "";
 
-    const callText = await callResp.text();
-    console.log("call status:", callResp.status, callText.slice(0, 200));
+    for (const submitUrl of submitUrls) {
+      try {
+        console.log("trying:", submitUrl);
+        const callResp = await fetch(submitUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + HF_TOKEN,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Origin": HF_SPACE,
+            "Referer": HF_SPACE + "/",
+          },
+          body: JSON.stringify(payload)
+        });
 
-    if (!callResp.ok) {
-      return res.json({ success: false, error: "提交失败:" + callResp.status + " " + callText.slice(0, 200) });
+        const callText = await callResp.text();
+        console.log("call status:", callResp.status, callText.slice(0, 200));
+
+        if (callResp.ok) {
+          const parsed = JSON.parse(callText);
+          if (parsed.event_id) {
+            eventId = parsed.event_id;
+            usedSubmitUrl = submitUrl;
+            break;
+          }
+        }
+      } catch(e) {
+        console.log("submit err:", e.message);
+      }
     }
 
-    let callResult;
-    try { callResult = JSON.parse(callText); } catch(e) {
-      return res.json({ success: false, error: "提交响应解析失败:" + callText.slice(0, 100) });
-    }
-
-    const eventId = callResult.event_id;
     if (!eventId) {
-      return res.json({ success: false, error: "未获取到event_id:" + callText.slice(0, 200) });
+      // 试 base64 方式
+      try {
+        const imgResp = await fetch(image_url, { headers: { "User-Agent": "Mozilla/5.0" } });
+        if (imgResp.ok) {
+          const imgBuffer = await imgResp.arrayBuffer();
+          const imgBase64 = Buffer.from(imgBuffer).toString("base64");
+          const dataUrl = "data:image/png;base64," + imgBase64;
+
+          const payload2 = { data: [dataUrl] };
+
+          for (const submitUrl of submitUrls) {
+            try {
+              const callResp = await fetch(submitUrl, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": "Bearer " + HF_TOKEN,
+                  "User-Agent": "Mozilla/5.0",
+                  "Origin": HF_SPACE,
+                  "Referer": HF_SPACE + "/",
+                },
+                body: JSON.stringify(payload2)
+              });
+              const callText = await callResp.text();
+              console.log("base64 call:", callResp.status, callText.slice(0, 200));
+              if (callResp.ok) {
+                const parsed = JSON.parse(callText);
+                if (parsed.event_id) {
+                  eventId = parsed.event_id;
+                  usedSubmitUrl = submitUrl;
+                  break;
+                }
+              }
+            } catch(e) {}
+          }
+        }
+      } catch(e) {
+        console.log("base64 err:", e.message);
+      }
     }
-    console.log("event_id:", eventId);
+
+    if (!eventId) {
+      return res.json({ success: false, error: "提交失败，所有方式都不行，查看Vercel日志" });
+    }
+
+    console.log("got event_id:", eventId);
 
     // 等待结果
-    const resultUrl = HF_SPACE + "/call/" + apiName + "/" + eventId;
-    console.log("getting result from:", resultUrl);
+    const resultUrl = usedSubmitUrl + "/" + eventId;
+    console.log("result url:", resultUrl);
 
     const resultResp = await fetch(resultUrl, {
       headers: {
@@ -150,7 +160,7 @@ export default async function handler(req, res) {
           currentEvent = t.slice(6).trim();
         } else if (t.startsWith("data:")) {
           const d = t.slice(5).trim();
-          console.log("SSE event:", currentEvent, "data:", d.slice(0, 150));
+          console.log("SSE:", currentEvent, d.slice(0, 100));
           if (currentEvent === "complete" && d && d !== "null") {
             try { resultData = JSON.parse(d); break outer; } catch(e) {}
           } else if (currentEvent === "error") {
@@ -164,12 +174,11 @@ export default async function handler(req, res) {
       return res.json({
         success: false,
         pending: true,
-        event_id: eventId,
-        error: "生成中（需要1-3分钟），请1分钟后重新发送图片"
+        error: "生成中（1-3分钟），请1分钟后重新发送图片"
       });
     }
 
-    console.log("resultData:", JSON.stringify(resultData).slice(0, 500));
+    console.log("result:", JSON.stringify(resultData).slice(0, 500));
 
     // 提取文件
     const files = [];
