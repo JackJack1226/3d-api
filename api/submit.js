@@ -1,3 +1,18 @@
+// 在 export default async function handler 里
+// 第一行加这个解析逻辑：
+
+let image_url = "";
+const contentType = req.headers["content-type"] || "";
+
+if (contentType.includes("application/json")) {
+  image_url = req.body?.image_url || "";
+} else if (contentType.includes("form")) {
+  // form-data 或 application/x-www-form-urlencoded
+  image_url = req.body?.image_url || "";
+} else {
+  // 尝试直接从 query 参数取
+  image_url = req.query?.image_url || req.body?.image_url || "";
+}
 const HF_SPACE = "https://multimodalart-qwen-image-multiple-angles-3d-camera.hf.space";
 const HF_TOKEN = process.env.HF_TOKEN;
 
