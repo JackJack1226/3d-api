@@ -5,169 +5,215 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).end();
 
-  const HF_SPACE = "https://linoyts-qwen-image-edit-angles.hf.space";
+  const HF_SPACE = "https://multimodalart-qwen-image-multiple-angles-3d-camera.hf.space";
   const HF_TOKEN = process.env.HF_TOKEN;
   const image_url = (req.body || {}).image_url || "";
 
   if (!image_url) return res.json({ success: false, error: "缺少image_url" });
 
   try {
-    // 下载图片转base64
+    // 下载图片
     const imgResp = await fetch(image_url, {
       headers: { "User-Agent": "Mozilla/5.0" }
     });
     if (!imgResp.ok) return res.json({ success: false, error: "下载图片失败:" + imgResp.status });
-    
     const imgBuffer = await imgResp.arrayBuffer();
-    const imgBase64 = Buffer.from(imgBuffer).toString("base64");
+    const rand = Math.random().toString(36).substring(2, 8);
+    const filename = rand + ".png";
 
-    // 生成6个角度的图片
-    const angles = [
-      { rotate: 0, tilt: 0, forward: 0, name: "正面(0°)" },
-      { rotate: 45, tilt: 0, forward: 0, name: "右前方(45°)" },
-      { rotate: 90, tilt: 0, forward: 0, name: "右侧(90°)" },
-      { rotate: 180, tilt: 0, forward: 0, name: "背面(180°)" },
-      { rotate: -90, tilt: 0, forward: 0, name: "左侧(270°)" },
-      { rotate: 0, tilt: 1, forward: 0, name: "俯视(Top)" }
-    ];
+    // 上传图片（带 HF Token）
+    const formData = new FormData();
+    formData.append("files", new Blob([imgBuffer], { type: "image/png" }), filename);
 
-    const results = [];
+    const uploadResp = await fetch(HF_SPACE + "/upload", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + HF_TOKEN,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Origin": HF_SPACE,
+        "Referer": HF_SPACE + "/",
+        "Accept": "*/*",
+      },
+      body: formData
+    });
 
-    for (const angle of angles) {
-      try {
-        // 正确的图片格式：PIL Image 内部格式
-        const imageParam = {
-          format: "png",
-          format_description: "PNG",
-          data: imgBase64
-        };
+    console.log("upload status:", uploadResp.status);
+    const uploadText = await uploadResp.text();
+    console.log("upload result:", uploadText.slice(0, 200));
 
-        const payload = {
-          data: [
-            imageParam,          // image
-            angle.rotate,        // rotate_deg
-            angle.forward,       // move_forward
-            angle.tilt,          // vertical_tilt
-            false,               // wideangle
-            0,                   // seed
-            true,                // randomize_seed
-            1.0,                 // true_guidance_scale
-            4,                   // num_inference_steps
-            null,                // height
-            null,                // width
-            null                 // prev_output
-          ]
-        };
+    if (!uploadResp.ok) {
+      return res.json({ success: false, error: "上传失败:" + uploadResp.status + " " + uploadText.slice(0, 100) });
+    }
 
-        const submitUrl = HF_SPACE + "/gradio_api/call/infer_edit_camera_angles";
-        console.log("submitting angle:", angle.name);
+    let paths;
+    try { paths = JSON.parse(uploadText); } catch(e) {
+      return res.json({ success: false, error: "上传响应解析失败:" + uploadText.slice(0, 100) });
+    }
 
-        const callResp = await fetch(submitUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + HF_TOKEN,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Origin": HF_SPACE,
-            "Referer": HF_SPACE + "/",
-          },
-          body: JSON.stringify(payload)
-        });
+    if (!paths || paths.length === 0) {
+      return res.json({ success: false, error: "上传返回为空" });
+    }
 
-        const callText = await callResp.text();
-        console.log("call status:", callResp.status, callText.slice(0, 200));
+    const uploadedPath = paths[0];
+    console.log("uploaded path:", uploadedPath);
 
-        if (!callResp.ok) continue;
+    // 获取 API 端点名
+    let apiName = "predict";
+    try {
+      const infoResp = await fetch(HF_SPACE + "/info", {
+        headers: {
+          "Authorization": "Bearer " + HF_TOKEN,
+          "User-Agent": "Mozilla/5.0"
+        }
+      });
+      if (infoResp.ok) {
+        const info = await infoResp.json();
+        const eps = Object.keys(info.named_endpoints || {});
+        console.log("endpoints:", eps);
+        if (eps.length > 0) apiName = eps[0].replace(/^\//, "");
+      }
+    } catch(e) { console.log("info error:", e.message); }
 
-        const callResult = JSON.parse(callText);
-        const eventId = callResult.event_id;
-        if (!eventId) continue;
+    // 提交任务
+    const payload = {
+      data: [{
+        path: uploadedPath,
+        orig_name: "image.png",
+        size: imgBuffer.byteLength,
+        mime_type: "image/png",
+        meta: { _type: "gradio.FileData" }
+      }]
+    };
 
-        // 获取结果
-        const resultResp = await fetch(
-          HF_SPACE + "/gradio_api/call/infer_edit_camera_angles/" + eventId,
-          {
-            headers: {
-              "Authorization": "Bearer " + HF_TOKEN,
-              "User-Agent": "Mozilla/5.0",
-              "Accept": "text/event-stream",
-              "Origin": HF_SPACE,
-              "Referer": HF_SPACE + "/",
-            }
-          }
-        );
+    const submitUrl = HF_SPACE + "/call/" + apiName;
+    console.log("submitting to:", submitUrl);
 
-        const reader = resultResp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "", currentEvent = "";
-        let resultData = null;
-        const deadline = Date.now() + 60000; // 每个角度最多等60秒
+    const callResp = await fetch(submitUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + HF_TOKEN,
+        "User-Agent": "Mozilla/5.0",
+        "Origin": HF_SPACE,
+        "Referer": HF_SPACE + "/",
+      },
+      body: JSON.stringify(payload)
+    });
 
-        outer: while (Date.now() < deadline) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop();
-          for (const line of lines) {
-            const t = line.trim();
-            if (t.startsWith("event:")) {
-              currentEvent = t.slice(6).trim();
-            } else if (t.startsWith("data:")) {
-              const d = t.slice(5).trim();
-              console.log("event:", currentEvent, "data:", d.slice(0, 100));
-              if (currentEvent === "complete" && d && d !== "null") {
-                try {
-                  resultData = JSON.parse(d);
-                  break outer;
-                } catch(e) {}
-              } else if (currentEvent === "error") {
-                console.log("error:", d);
-                break outer;
-              }
-            }
+    const callText = await callResp.text();
+    console.log("call status:", callResp.status, callText.slice(0, 200));
+
+    if (!callResp.ok) {
+      return res.json({ success: false, error: "提交失败:" + callResp.status + " " + callText.slice(0, 200) });
+    }
+
+    let callResult;
+    try { callResult = JSON.parse(callText); } catch(e) {
+      return res.json({ success: false, error: "提交响应解析失败:" + callText.slice(0, 100) });
+    }
+
+    const eventId = callResult.event_id;
+    if (!eventId) {
+      return res.json({ success: false, error: "未获取到event_id:" + callText.slice(0, 200) });
+    }
+    console.log("event_id:", eventId);
+
+    // 等待结果
+    const resultUrl = HF_SPACE + "/call/" + apiName + "/" + eventId;
+    console.log("getting result from:", resultUrl);
+
+    const resultResp = await fetch(resultUrl, {
+      headers: {
+        "Authorization": "Bearer " + HF_TOKEN,
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/event-stream",
+        "Origin": HF_SPACE,
+        "Referer": HF_SPACE + "/",
+      }
+    });
+
+    const reader = resultResp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "", currentEvent = "";
+    let resultData = null;
+    const deadline = Date.now() + 18000;
+
+    outer: while (Date.now() < deadline) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        const t = line.trim();
+        if (t.startsWith("event:")) {
+          currentEvent = t.slice(6).trim();
+        } else if (t.startsWith("data:")) {
+          const d = t.slice(5).trim();
+          console.log("SSE event:", currentEvent, "data:", d.slice(0, 150));
+          if (currentEvent === "complete" && d && d !== "null") {
+            try { resultData = JSON.parse(d); break outer; } catch(e) {}
+          } else if (currentEvent === "error") {
+            return res.json({ success: false, error: "生成失败:" + d.slice(0, 200) });
           }
         }
-
-        if (resultData) {
-          // 提取图片URL
-          // 返回格式：[{format: "png", format_description: "PNG", data: "base64..."}, seed, prompt]
-          const firstResult = Array.isArray(resultData) ? resultData[0] : resultData;
-          console.log("result type:", typeof firstResult, JSON.stringify(firstResult).slice(0, 100));
-          
-          if (firstResult && firstResult.data) {
-            // 返回的是base64，直接用data URI
-            const dataUrl = "data:image/png;base64," + firstResult.data;
-            results.push({ name: angle.name, url: dataUrl });
-          } else if (firstResult && firstResult.url) {
-            results.push({ name: angle.name, url: firstResult.url });
-          } else if (firstResult && firstResult.path) {
-            const fileUrl = firstResult.path.startsWith("/") 
-              ? HF_SPACE + "/file=" + firstResult.path 
-              : firstResult.path;
-            results.push({ name: angle.name, url: fileUrl });
-          } else {
-            console.log("unknown result format:", JSON.stringify(firstResult).slice(0, 300));
-          }
-        }
-
-      } catch(e) {
-        console.log("angle error:", angle.name, e.message);
-        continue;
       }
     }
 
-    if (results.length === 0) {
-      return res.json({ success: false, error: "所有角度生成失败，请重试" });
+    if (!resultData) {
+      return res.json({
+        success: false,
+        pending: true,
+        event_id: eventId,
+        error: "生成中（需要1-3分钟），请1分钟后重新发送图片"
+      });
     }
 
-    let resultText = "🎉 多角度视图生成完成！\n\n";
-    results.forEach(r => {
-      resultText += "📷 **" + r.name + "**\n" + r.url + "\n\n";
-    });
-    resultText += "✨ 还需要生成其他物品吗？直接发图片！";
+    console.log("resultData:", JSON.stringify(resultData).slice(0, 500));
 
-    return res.json({ success: true, result: resultText, images: results.map(r => r.url) });
+    // 提取文件
+    const files = [];
+    function findFiles(obj, depth) {
+      if (depth > 8 || !obj) return;
+      if (Array.isArray(obj)) obj.forEach(i => findFiles(i, depth + 1));
+      else if (typeof obj === "object") {
+        for (const key of ["path", "url", "video", "image"]) {
+          if (typeof obj[key] === "string" && obj[key].length > 3) files.push(obj[key]);
+          else if (typeof obj[key] === "object") findFiles(obj[key], depth + 1);
+        }
+        Object.values(obj).forEach(v => typeof v === "object" && findFiles(v, depth + 1));
+      }
+    }
+    findFiles(resultData, 0);
+
+    const seen = new Set();
+    const unique = files.filter(f => !seen.has(f) && seen.add(f));
+
+    if (unique.length === 0) {
+      return res.json({
+        success: false,
+        error: "未识别到文件：" + JSON.stringify(resultData).slice(0, 300)
+      });
+    }
+
+    const images = [], videos = [], models = [];
+    for (const f of unique) {
+      const url = f.startsWith("/") ? HF_SPACE + "/file=" + f : f;
+      const low = f.toLowerCase();
+      if ([".png",".jpg",".jpeg",".webp"].some(e => low.endsWith(e))) images.push(url);
+      else if ([".mp4",".webm",".gif"].some(e => low.endsWith(e))) videos.push(url);
+      else if ([".glb",".obj",".ply"].some(e => low.endsWith(e))) models.push(url);
+      else images.push(url);
+    }
+
+    const angles = ["正面(0°)","右前方(45°)","右侧(90°)","背面(180°)","左侧(270°)","俯视(Top)"];
+    let resultText = "🎉 多角度3D视图生成完成！\n\n";
+    images.forEach((u, i) => { resultText += "📷 **" + (angles[i] || "视图"+(i+1)) + "**\n" + u + "\n\n"; });
+    videos.forEach(u => { resultText += "🎬 旋转预览\n" + u + "\n\n"; });
+    models.forEach(u => { resultText += "📦 3D模型\n" + u + "\n"; });
+    resultText += "\n✨ 还需要生成其他物品吗？直接发图片！";
+
+    return res.json({ success: true, result: resultText, images, videos, models });
 
   } catch(e) {
     return res.json({ success: false, error: "异常:" + e.message });
