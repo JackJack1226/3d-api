@@ -12,7 +12,6 @@ module.exports = async function handler(req, res) {
   if (!image_url) return res.json({ success: false, error: "缺少image_url" });
 
   try {
-    // 下载图片转base64
     const imgResp = await fetch(image_url, {
       headers: { "User-Agent": "Mozilla/5.0" }
     });
@@ -21,26 +20,18 @@ module.exports = async function handler(req, res) {
     const imgBase64 = Buffer.from(imgBuffer).toString("base64");
     const imgDataUrl = `data:image/png;base64,${imgBase64}`;
 
-    // 用 gradio_api 接口提交
     const submitUrl = `${HF_SPACE}/gradio_api/call/predict`;
-    console.log("submitting to:", submitUrl);
-
-    // 尝试不同的数据格式
     const payloads = [
-      // 格式1：直接传base64字符串
       { data: [imgDataUrl] },
-      // 格式2：FileData对象格式
       { data: [{ path: imgDataUrl, orig_name: "image.png", mime_type: "image/png", meta: { _type: "gradio.FileData" } }] },
-      // 格式3：url格式
       { data: [{ url: image_url, orig_name: "image.png", mime_type: "image/png", meta: { _type: "gradio.FileData" } }] },
     ];
 
     let eventId = null;
-
     for (const payload of payloads) {
       try {
-        console.log("trying payload:", JSON.stringify(payload).slice(0, 100));
-        const callResp = await fetch(submitUrl, {
+        console.log("trying payload:", JSON.stringify(payload).slice(0, 80));
+        const r = await fetch(submitUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -48,38 +39,21 @@ module.exports = async function handler(req, res) {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Origin": HF_SPACE,
             "Referer": HF_SPACE + "/",
-            "Accept": "application/json",
           },
           body: JSON.stringify(payload)
         });
-
-        const text = await callResp.text();
-        console.log("call status:", callResp.status, text.slice(0, 300));
-
-        if (callResp.ok) {
-          try {
-            const parsed = JSON.parse(text);
-            if (parsed.event_id) {
-              eventId = parsed.event_id;
-              console.log("got event_id:", eventId);
-              break;
-            }
-          } catch(e) {}
+        const t = await r.text();
+        console.log("status:", r.status, t.slice(0, 200));
+        if (r.ok) {
+          const parsed = JSON.parse(t);
+          if (parsed.event_id) { eventId = parsed.event_id; break; }
         }
-      } catch(e) {
-        console.log("payload error:", e.message);
-      }
+      } catch(e) { console.log("err:", e.message); }
     }
 
-    if (!eventId) {
-      return res.json({ success: false, error: "提交失败，所有格式都不行，请查看日志" });
-    }
+    if (!eventId) return res.json({ success: false, error: "提交失败，查看Vercel日志" });
 
-    // 等待结果
-    const resultUrl = `${HF_SPACE}/gradio_api/call/predict/${eventId}`;
-    console.log("getting result from:", resultUrl);
-
-    const resultResp = await fetch(resultUrl, {
+    const resultResp = await fetch(`${HF_SPACE}/gradio_api/call/predict/${eventId}`, {
       headers: {
         "Authorization": `Bearer ${HF_TOKEN}`,
         "User-Agent": "Mozilla/5.0",
@@ -91,8 +65,7 @@ module.exports = async function handler(req, res) {
 
     const reader = resultResp.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = "";
-    let currentEvent = "";
+    let buffer = "", currentEvent = "";
     let resultData = null;
     const timeout = Date.now() + 18000;
 
@@ -107,23 +80,20 @@ module.exports = async function handler(req, res) {
         if (t.startsWith("event:")) {
           currentEvent = t.slice(6).trim();
         } else if (t.startsWith("data:")) {
-          const dataStr = t.slice(5).trim();
-          console.log("event:", currentEvent, "data:", dataStr.slice(0, 200));
-          if (currentEvent === "complete" && dataStr) {
-            try { resultData = JSON.parse(dataStr); } catch(e) {}
+          const d = t.slice(5).trim();
+          console.log("event:", currentEvent, "data:", d.slice(0, 200));
+          if (currentEvent === "complete" && d) {
+            try { resultData = JSON.parse(d); } catch(e) {}
           } else if (currentEvent === "error") {
-            return res.json({ success: false, error: "生成失败:" + dataStr.slice(0, 200) });
+            return res.json({ success: false, error: "生成失败:" + d.slice(0, 200) });
           }
         }
       }
       if (resultData !== null) break;
     }
 
-    if (!resultData) {
-      return res.json({ success: false, pending: true, error: "生成中，请1分钟后重新发图片" });
-    }
+    if (!resultData) return res.json({ success: false, pending: true, error: "生成中，请1分钟后重新发图片" });
 
-    // 提取文件
     const files = [];
     function findFiles(obj, depth) {
       if (depth > 8 || !obj) return;
@@ -141,9 +111,7 @@ module.exports = async function handler(req, res) {
     const seen = new Set();
     const unique = files.filter(f => !seen.has(f) && seen.add(f));
 
-    if (unique.length === 0) {
-      return res.json({ success: false, error: "未识别到文件：" + JSON.stringify(resultData).slice(0, 300) });
-    }
+    if (unique.length === 0) return res.json({ success: false, error: "未识别到文件：" + JSON.stringify(resultData).slice(0,300) });
 
     const images=[], videos=[], models=[];
     for (const f of unique) {
@@ -165,6 +133,6 @@ module.exports = async function handler(req, res) {
     return res.json({ success: true, result: resultText, images, videos, models });
 
   } catch(e) {
-    return res.json({ success: false, error: "异常:" + e.message + "\n" + (e.stack||"").slice(0,300) });
+    return res.json({ success: false, error: "异常:" + e.message });
   }
-}
+};
