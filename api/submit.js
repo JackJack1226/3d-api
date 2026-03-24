@@ -5,7 +5,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).end();
 
-  const HF_SPACE = "https://multimodalart-qwen-image-multiple-angles-3d-camera.hf.space";
+  const HF_SPACE = "https://bils-qwen-image-multiple-angles-3d-camera.hf.space";
   const HF_TOKEN = process.env.HF_TOKEN;
   const image_url = (req.body || {}).image_url || "";
 
