@@ -44,8 +44,19 @@ export default async function handler(req, res) {
             "Origin": HF_SPACE,
             "Referer": HF_SPACE + "/",
           },
-          body: JSON.stringify({ data: [imgDataUrl] })
-        });
+          body: JSON.stringify({
+  data: [
+    {
+      "path": imgDataUrl,
+      "url": imgDataUrl,
+      "size": null,
+      "orig_name": "image.png",
+      "mime_type": "image/png",
+      "is_stream": false,
+      "meta": {"_type": "gradio.FileData"}
+    }
+  ]
+})
         const t = await r.text();
         console.log("result:", ep.submit, r.status, t.slice(0, 300));
 
