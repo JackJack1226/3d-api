@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "functions": {
+    "api/submit.js": { "maxDuration": 25 },
+    "api/result.js": { "maxDuration": 25 }
+  }
+}
