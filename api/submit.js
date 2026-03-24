@@ -1,38 +1,29 @@
-// 在 export default async function handler 里
-// 第一行加这个解析逻辑：
-
-let image_url = "";
-const contentType = req.headers["content-type"] || "";
-
-if (contentType.includes("application/json")) {
-  image_url = req.body?.image_url || "";
-} else if (contentType.includes("form")) {
-  // form-data 或 application/x-www-form-urlencoded
-  image_url = req.body?.image_url || "";
-} else {
-  // 尝试直接从 query 参数取
-  image_url = req.query?.image_url || req.body?.image_url || "";
-}
-const HF_SPACE = "https://multimodalart-qwen-image-multiple-angles-3d-camera.hf.space";
-const HF_TOKEN = process.env.HF_TOKEN;
-
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).end();
 
-  const { image_url } = req.body || {};
-  if (!image_url) return res.json({ success: false, error: "缺少image_url" });
+  const HF_SPACE = "https://multimodalart-qwen-image-multiple-angles-3d-camera.hf.space";
+  const HF_TOKEN = process.env.HF_TOKEN;
+
+  const body = req.body || {};
+  const image_url = body.image_url || "";
+  
+  if (!image_url) {
+    return res.json({ success: false, error: "缺少image_url，收到的body：" + JSON.stringify(body) });
+  }
 
   try {
     // 下载图片
     const imgResp = await fetch(image_url, {
       headers: { "User-Agent": "Mozilla/5.0" }
     });
-    if (!imgResp.ok) return res.json({ success: false, error: "下载图片失败:" + imgResp.status });
-
+    if (!imgResp.ok) {
+      return res.json({ success: false, error: "下载图片失败:" + imgResp.status });
+    }
     const imgBuffer = await imgResp.arrayBuffer();
     const rand = Math.random().toString(36).substring(2, 8);
     const filename = rand + ".png";
@@ -59,12 +50,22 @@ export default async function handler(req, res) {
         });
         if (resp.ok) {
           const paths = await resp.json();
-          if (paths && paths.length > 0) { uploadedPath = paths[0]; break; }
+          if (paths && paths.length > 0) {
+            uploadedPath = paths[0];
+            break;
+          }
+        } else {
+          const t = await resp.text();
+          console.log("upload failed:", resp.status, t.slice(0, 200));
         }
-      } catch (e) {}
+      } catch (e) {
+        console.log("upload error:", e.message);
+      }
     }
 
-    if (!uploadedPath) return res.json({ success: false, error: "上传失败，请重试" });
+    if (!uploadedPath) {
+      return res.json({ success: false, error: "上传失败，请重试" });
+    }
 
     // 获取端点
     let apiName = "predict";
@@ -107,9 +108,11 @@ export default async function handler(req, res) {
 
     const callResult = await callResp.json();
     const eventId = callResult.event_id;
-    if (!eventId) return res.json({ success: false, error: "未获取到event_id" });
+    if (!eventId) {
+      return res.json({ success: false, error: "未获取到event_id:" + JSON.stringify(callResult).slice(0, 200) });
+    }
 
-    // 等待结果（最多20秒，Vercel免费版限制）
+    // 等待结果（最多18秒）
     const resultResp = await fetch(`${HF_SPACE}/call/${apiName}/${eventId}`, {
       headers: {
         "Authorization": `Bearer ${HF_TOKEN}`,
@@ -149,14 +152,13 @@ export default async function handler(req, res) {
       if (resultData !== null) break;
     }
 
-    // 超时但任务还在跑，返回event_id让用户稍后查询
     if (!resultData) {
       return res.json({
         success: false,
         pending: true,
         event_id: eventId,
         api_name: apiName,
-        error: "生成中（3D需要1-3分钟），请1分钟后重新发送图片"
+        error: "生成中（1-3分钟），请稍后重新发送图片"
       });
     }
 
@@ -202,6 +204,6 @@ export default async function handler(req, res) {
     return res.json({ success: true, result: resultText, images, videos, models });
 
   } catch (e) {
-    return res.json({ success: false, error: "异常:" + e.message });
+    return res.json({ success: false, error: "异常:" + e.message + " stack:" + (e.stack || "").slice(0, 200) });
   }
 }
